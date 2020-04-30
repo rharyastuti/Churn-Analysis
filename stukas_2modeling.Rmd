@@ -1,0 +1,331 @@
+---
+title: "Churn on Telcom - Modeling"
+author: "Rizqi Haryastuti"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Brief Description
+
+Laman ini adalah laman ke-2 (setelah **eksplorasi**), berisi **modeling** mengenai "aktifitas churn" pelanggan sebuah perusahaan telekomunikasi. Studi kasus berikut diberikan pada mata kuliah STK692 (TA 19/20), program studi S2 Statistika Terapan, IPB. Data dan keterangan dapat diakses melalui <https://www.stat.ipb.ac.id/pasca/id/index.php/2019/11/19/527/>.
+
+Oleh:
+Muthia Nadhira Faladiba, Citra Komang Sari, Rizqi Haryastuti
+
+Pada pemodelan prediksi dalam studi kasus ini, dicobakan algoritma dasar klasifikasi (*Base Learner*), yakni *random forest*, *boosting*, dan *random undersampling boosting*, serta algoritma yang dapat menggabungkan algoritma dasar (*ensemble*), *Super Learner*.
+
+```{r library, message=FALSE}
+library(caret)
+library(randomForest)
+library(rpart)
+library(ada)
+library(adabag)
+library(ebmc)
+library(SuperLearner)
+library(ranger)
+library(xgboost)
+library(glmnet)
+
+```
+
+```{r input_data}
+loc <- "D:/RH/2 AKADEMIK S2/Semester 3/STK692 - Studi Kasus/dataexp.csv"
+dataexp <- read.csv(loc, header=T)
+
+## arrange data
+dataexp[c(17:22)] <- lapply(dataexp[c(17:22)], function(x) as.factor(x))
+
+```
+
+Dilakukan *undersampling* dan *balancing* terhadap 90000 data, yakni masing-masing 4500 untuk pelanggan dengan status "Churn" dan "Stay". 
+
+```{r sampling_data}
+d1s <- dataexp[which(dataexp$lapsed_flag==0),]
+d1c <- dataexp[which(dataexp$lapsed_flag==1),]
+
+set.seed(197)
+sampel <- sample(1:nrow(d1c), 4500)
+
+train <- rbind(d1s[sampel,], d1c[sampel,])
+test <- rbind(d1s[-sampel,], d1c[-sampel,])
+data <- train
+
+```
+
+# Base Learner
+
+## Random Forest
+
+```{r}
+met.RF=function(k.cv, ulang){
+  hsl2=NULL
+  for (i in 1:ulang){
+    acak=createFolds(data$lapsed_flag, k=k.cv)
+    hsl1=NULL
+    for (j in 1:k.cv){
+      training<-data[-(acak[[j]]),-c(2:3,11:13)]
+      testing<-data[acak[[j]],-c(2:3,11:13)]
+      
+      # Random Forest
+      rf<-randomForest(lapsed_flag~., data=training)
+      pred.rf<-predict(rf, testing)
+      hasil=confusionMatrix(pred.rf, testing$lapsed_flag, positive = '0')
+      # Hasil Kebaikan
+      acc=hasil$overall[1]
+      sen=hasil$byClass[1]
+      spe=hasil$byClass[2]
+      ratgeo=(acc*sen*spe)^(1/3)
+      # Hasil Akhir
+      hsl=cbind(acc,sen,spe,ratgeo)
+      hsl1=rbind(hsl1, hsl)
+    }
+    hsl2=rbind(hsl2, hsl1)
+  }
+  
+  #result
+  rownames(hsl2)=c(1:(ulang*k.cv))
+  rincian=data.frame(hsl2)
+  rataan=cbind.data.frame(mean(hsl2[,1]),mean(hsl2[,2]),mean(hsl2[,3]),mean(hsl2[,4]))
+  colnames(rataan)=c('acc','sen','spe','ratgeo')
+  result=list('Rincian Random Forest'=rincian,
+              'Rataan Random Forest'=rataan)
+  return(result)
+}
+
+```
+
+```{r}
+hasil.RF.nofull=met.RF(k.cv = 5, ulang = 3)
+hasil.RF.nofull
+
+```
+
+## Boosting
+
+```{r}
+met.Boost=function(k.cv, ulang){
+  hsl2=NULL
+  for (i in 1:ulang){
+    acak=createFolds(data$lapsed_flag, k=k.cv)
+    hsl1=NULL
+    for (j in 1:k.cv){
+      training<-data[-(acak[[j]]),-c(2:3,11:13)]
+      testing<-data[acak[[j]],-c(2:3,11:13)]
+      
+      # Boosting
+      boost<-ada(lapsed_flag~., data=training, type="discrete")
+      pred.boost<-predict(boost, testing)
+      pred.boost<-as.factor(pred.boost)
+      hasil=confusionMatrix(pred.boost, as.factor(testing$lapsed_flag), positive = '0')
+      # Hasil Kebaikan
+      acc=hasil$overall[1]
+      sen=hasil$byClass[1]
+      spe=hasil$byClass[2]
+      ratgeo=(acc*sen*spe)^(1/3)
+      # Hasil Akhir
+      hsl=cbind(acc,sen,spe,ratgeo)
+      hsl1=rbind(hsl1, hsl)
+    }
+    hsl2=rbind(hsl2, hsl1)
+  }
+  
+  #result
+  rownames(hsl2)=c(1:(ulang*k.cv))
+  rincian=data.frame(hsl2)
+  rataan=cbind.data.frame(mean(hsl2[,1]),mean(hsl2[,2]),mean(hsl2[,3]),mean(hsl2[,4]))
+  colnames(rataan)=c('acc','sen','spe','ratgeo')
+  result=list('Rincian Boosting'=rincian,
+              'Rataan Boosting'=rataan)
+  return(result)
+}
+
+```
+
+```{r}
+hasil.Boost.nofull=met.Boost(k.cv = 5, ulang = 3)
+hasil.Boost.nofull
+
+```
+
+## RUS Boost
+
+```{r}
+met.RUS.Boost=function(k.cv, ulang){
+  hsl2=NULL
+  for (i in 1:ulang){
+    acak=createFolds(data$lapsed_flag, k=k.cv)
+    hsl1=NULL
+    for (j in 1:k.cv){
+      training<-data[-(acak[[j]]), -c(2:3,11:13)]
+      testing<-data[acak[[j]],-c(2:3,11:13)]
+      
+      # Boosting
+      rus.boost <- rus(lapsed_flag ~ ., data = training, size = 10, 
+                       alg = "c50", ir = 1)
+      pred.rus.boost<-predict(rus.boost, testing, type="class")
+      pred.rus.boost<-as.factor(pred.rus.boost)
+      hasil=confusionMatrix(pred.rus.boost, as.factor(testing$lapsed_flag), positive = '0')
+      # Hasil Kebaikan
+      acc=hasil$overall[1]
+      sen=hasil$byClass[1]
+      spe=hasil$byClass[2]
+      ratgeo=(acc*sen*spe)^(1/3)
+      # Hasil Akhir
+      hsl=cbind(acc,sen,spe,ratgeo)
+      hsl1=rbind(hsl1, hsl)
+    }
+    hsl2=rbind(hsl2, hsl1)
+  }
+  
+  #result
+  rownames(hsl2)=c(1:(ulang*k.cv))
+  rincian=data.frame(hsl2)
+  rataan=cbind.data.frame(mean(hsl2[,1]),mean(hsl2[,2]),mean(hsl2[,3]),mean(hsl2[,4]))
+  colnames(rataan)=c('acc','sen','spe','ratgeo')
+  result=list('Rincian RUS-Boost'=rincian,
+              'Rataan RUS-Boost'=rataan)
+  return(result)
+}
+
+```
+
+```{r}
+hasil.RUS.Boost=met.RUS.Boost(k.cv = 5, ulang = 3)
+hasil.RUS.Boost
+
+```
+
+Dari beberapa algoritma dasar yang dicoba, didapatkan akurasi rataan geometrik metode Boosting yang paling tinggi, yakni sebesar 75.883%. Namun nilai tersebut tidak jauh berbeda dengan hasil dari metode Random Forest, yakni sebesar 75.731%.
+
+
+# Super Learner
+
+**recall!**
+
+d1s <- dataexp[which(dataexp$lapsed_flag==0),]
+d1c <- dataexp[which(dataexp$lapsed_flag==1),]
+
+set.seed(197)
+sampel <- sample(1:nrow(d1c), 4500)
+
+train <- rbind(d1s[sampel,], d1c[sampel,])
+test <- rbind(d1s[-sampel,], d1c[-sampel,])
+data <- train
+
+
+### Split: train & test
+
+```{r}
+acak <- createDataPartition(data$lapsed_flag, p=0.8, list=FALSE)
+data.tr <- data[acak,-c(2:3,11:13)]
+data.ts <- data[-acak,-c(2:3,11:13)]
+
+y <- as.numeric(data.tr[,12])-1
+ytest <- as.numeric(data.ts[,12])-1
+x <- data.frame(data.tr[,-12])
+xtest <- data.frame(data.ts[,-12])
+
+```
+
+### Tunning parameter
+
+```{r}
+SL.ranger.tune <- function(...){
+  SL.ranger(..., num.trees=500, mtry=4)
+}
+SL.randomforest.tune <- function(...){
+  SL.ranger(..., num.trees=500, mtry=4)
+}
+SL.ipredbagg.tune <- function(...){
+  SL.ipredbagg(..., nbagg=250)
+}
+
+```
+
+### cross-validation pada Super Learner
+
+```{r}
+cv.model.tune <- CV.SuperLearner(y,
+                                 x,
+                                 V=5,
+                                 SL.library=list("SL.ranger.tune",
+                                                 "SL.ipredbagg.tune",
+                                                 "SL.xgboost",
+                                                 "SL.randomforest.tune"
+                                                 ))
+
+```
+
+```{r}
+# Get summary statistics
+summary(cv.model.tune)
+
+```
+
+```{r}
+plot(cv.model.tune)
+
+```
+
+```{r}
+# Create the tuned model
+model.tune <- SuperLearner(y,
+                           x,
+                           SL.library=list("SL.ranger.tune",
+                                           "SL.ipredbagg.tune",
+                                           "SL.xgboost",
+                                           "SL.randomforest.tune"
+                                           ))
+
+
+```
+
+
+Risk yang dihasilkan model dengan metode *random forest* dan *ranger* hampir sama. Hal ini wajar terjadi karena *ranger* merupakan implementasi dari random forest namun dengan komputasi yang lebih cepat (*fast implementation*).  
+
+
+```{r}
+# Gather predictions for the tuned model
+predictions.tune <- predict.SuperLearner(model.tune, newdata=xtest)
+conv.preds <- ifelse(predictions.tune$library.predict[,4]>=0.5,1,0)
+eval.sl <- confusionMatrix(as.factor(conv.preds), as.factor(ytest))
+eval.sl
+
+```
+
+Berdasarkan pemodelan dengan *Base Learner* dan *Super Learner*, kelompok kami memutuskan model prediksi dengan metode *Random Forest* adalah model yang lebih dibandingkan model dengan metode lain. 
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
